@@ -1,0 +1,79 @@
+name: build-windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Enable long paths
+        run: git config --global core.longpaths true
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NASM
+        uses: ilammy/setup-nasm@v1
+
+      - name: Set NASM_PREFIX
+        run: |
+          $nasmPath = (Get-Command nasm).Source
+          $nasmDir = (Split-Path -Parent $nasmPath) + '\'
+          "NASM_PREFIX=$nasmDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set VCPKG_ROOT
+        run: |
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE\\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Fetch vcpkg
+        run: |
+          if (!(Test-Path -Path vcpkg)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
+          }
+
+      - name: Restore vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg\installed
+            vcpkg\packages
+            vcpkg\buildtrees
+            vcpkg\downloads
+          key: vcpkg-windows-${{ hashFiles('usermode/vcpkg.json') }}
+
+      - name: Setup vcpkg (classic mode)
+        run: |
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg.exe integrate install
+          .\vcpkg\vcpkg.exe install zydis cli11 --triplet x64-windows
+
+      - name: Build EDK2 libs
+        run: |
+          msbuild .\uefi-boot\ext\edk2\build\EDK-II.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Build hyper-reV
+        run: |
+          msbuild .\hyper-reV.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyper-reV-windows-x64-Release
+          if-no-files-found: error
+          path: |
+            build\x64\Release\uefi-boot.efi
+            build\x64\Release\hyperv-attachment.dll
+            build\x64\Release\usermode.exe
