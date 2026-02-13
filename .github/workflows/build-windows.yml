@@ -77,3 +77,4 @@ jobs:
             build\x64\Release\uefi-boot.efi
             build\x64\Release\hyperv-attachment.dll
             build\x64\Release\usermode.exe
+
