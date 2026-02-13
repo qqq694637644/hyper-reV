@@ -20,6 +20,7 @@ jobs:
       VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
       VCPKG_DEFAULT_TRIPLET: x64-windows-static
       VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\usermode\vcpkg_installed
 
     steps:
       - name: Enable long paths
@@ -53,10 +54,18 @@ jobs:
             git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
           }
 
-      - name: Setup vcpkg (classic mode)
+      - name: Setup vcpkg
         run: |
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg.exe install zydis cli11 --triplet x64-windows-static
+          # Persist VCPKG_INSTALLED_DIR for MSBuild/Vcpkg integration.
+          "VCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install vcpkg deps (manifest)
+        run: |
+          # usermode/usermode.vcxproj has VcpkgEnableManifest=true, so install next to that manifest.
+          Push-Location usermode
+          ..\vcpkg\vcpkg.exe install --triplet x64-windows-static
+          Pop-Location
 
       - name: Build EDK2 libs
         run: |
