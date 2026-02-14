@@ -28,7 +28,7 @@ void set_up_identity_map(pml4e_64* pml4e)
 
         pdpte->flags = 0;
         pdpte->page_frame_number = i;
-        pdpte->present = 1;
+        pdpte->present = 1; 
         pdpte->write = 1;
         pdpte->large_page = 1;
     }

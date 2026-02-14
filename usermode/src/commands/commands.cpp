@@ -406,7 +406,8 @@ void process_fl(CLI::App* fl)
 				std::println("  0x{:X}", stack_value);
 			}
 
-			std::println();
+			// MSVC's std::println has no zero-arg overload; print an empty line.
+			std::println("");
 		}
 	}
 }
