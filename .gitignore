@@ -401,3 +401,14 @@ FodyWeavers.xsd
 *.sln.iml
 
 build/
+bootmgfw.efi
+bootmgfw.efi.i64
+hvloader.dll
+hvloader.dll.i64
+hvloader.dll.id0
+hvloader.dll.id1
+hvloader.dll.id2
+hvloader.dll.nam
+hvloader.dll.til
+winload.efi
+winload.efi.i64

@@ -1,4 +1,4 @@
-#include "bootmgfw.h"
+﻿#include "bootmgfw.h"
 
 #include "../winload/winload.h"
 #include "../memory_manager/memory_manager.h"
@@ -17,6 +17,7 @@ hook_data_t bootmgfw_load_pe_image_hook_data = { 0 };
 
 EFI_STATUS write_original_bootmgfw_back(EFI_FILE_INFO* original_bootmgfw_file_info, EFI_FILE_PROTOCOL* bootmgfw_file, void* buffer, UINT64 buffer_size)
 {
+    // 把备份的 bootmgfw.original.efi 内容写回 bootmgfw.efi。
     EFI_STATUS status = disk_write_file(bootmgfw_file, buffer, buffer_size);
 
     if (status != EFI_SUCCESS)
@@ -34,6 +35,7 @@ EFI_STATUS write_original_bootmgfw_back(EFI_FILE_INFO* original_bootmgfw_file_in
         return status;
     }
 
+    // 写回后同步时间戳，减少“文件被替换过”的直观痕迹。
     bootmgfw_file_info->CreateTime = original_bootmgfw_file_info->CreateTime;
     bootmgfw_file_info->ModificationTime = original_bootmgfw_file_info->ModificationTime;
 
@@ -51,6 +53,7 @@ EFI_STATUS write_original_bootmgfw_back(EFI_FILE_INFO* original_bootmgfw_file_in
 
 EFI_STATUS bootmgfw_restore_original_file(EFI_HANDLE* device_handle_out)
 {
+    // 打开之前备份出来的 bootmgfw.original.efi。
     EFI_FILE_PROTOCOL* bootmgfw_original_file = NULL;
 
     EFI_STATUS status = disk_open_file(&bootmgfw_original_file, device_handle_out, d_path_original_bootmgfw, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, EFI_FILE_SYSTEM);
@@ -73,6 +76,7 @@ EFI_STATUS bootmgfw_restore_original_file(EFI_HANDLE* device_handle_out)
             {
                 EFI_FILE_PROTOCOL* bootmgfw_file = NULL;
 
+                // 打开当前 bootmgfw.efi 并覆盖成原始内容。
                 status = disk_open_file(&bootmgfw_file, device_handle_out, d_bootmgfw_path, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, EFI_FILE_SYSTEM);
 
                 if (status == EFI_SUCCESS)
@@ -96,12 +100,14 @@ EFI_STATUS bootmgfw_restore_original_file(EFI_HANDLE* device_handle_out)
 
 UINT64 bootmgfw_load_pe_image_detour(bl_file_info_t* file_info, INT32 a2, UINT64* image_base, UINT32* image_size, UINT64* a5, UINT32* a6, UINT32* a7, UINT64 a8, UINT64 a9, unknown_param_t a10, unknown_param_t a11, unknown_param_t a12, unknown_param_t a13, unknown_param_t a14, unknown_param_t a15)
 {
+    // Detour 模板：先临时关闭当前 hook，调用原函数，避免递归触发。
     hook_disable(&bootmgfw_load_pe_image_hook_data);
 
     boot_load_pe_image_t original_subroutine = (boot_load_pe_image_t)bootmgfw_load_pe_image_hook_data.hooked_subroutine_address;
 
     UINT64 return_value = original_subroutine(file_info, a2, image_base, image_size, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
 
+    // 当 bootmgfw 正在加载 winload.efi 时，进入下一跳（在 winload 上下同类 hook）。
     if (StrStr(file_info->file_name, L"winload.efi") != NULL)
     {
         if (winload_place_hooks(*image_base, (UINT64)*image_size) == EFI_SUCCESS)
@@ -116,6 +122,7 @@ UINT64 bootmgfw_load_pe_image_detour(bl_file_info_t* file_info, INT32 a2, UINT64
         return return_value;
     }
 
+    // 非目标文件则恢复 hook，继续等待下一次 ImgpLoadPEImage 命中。
     hook_enable(&bootmgfw_load_pe_image_hook_data);
 
     return return_value;
@@ -126,6 +133,7 @@ EFI_STATUS bootmgfw_place_load_pe_image_hook(EFI_LOADED_IMAGE* bootmgfw_image_in
     CHAR8* code_ref_to_load_pe_image = NULL;
 
     // ImgpLoadPEImage
+    // 通过特征码扫描定位 bootmgfw 内部调用点，再回推出目标函数地址。
     EFI_STATUS status = scan_image(&code_ref_to_load_pe_image, bootmgfw_image_info->ImageBase, bootmgfw_image_info->ImageSize, d_boot_load_pe_image_pattern, d_boot_load_pe_image_mask);
 
     if (status != EFI_SUCCESS)
@@ -170,6 +178,7 @@ EFI_STATUS parse_uefi_boot_image_info(EFI_HANDLE image_handle)
         return status;
     }
 
+    // 这两个值会传给 hyperv-attachment，供其在后续阶段清理 UEFI 映像痕迹使用。
     uefi_boot_physical_base_address = (UINT64)image_info->ImageBase;
     uefi_boot_image_size = (UINT32)image_info->ImageSize;
 
@@ -178,6 +187,7 @@ EFI_STATUS parse_uefi_boot_image_info(EFI_HANDLE image_handle)
 
 EFI_STATUS bootmgfw_run_original_image(EFI_HANDLE parent_image_handle, EFI_HANDLE device_handle)
 {
+    // 先记录当前 uefi-boot 映像信息，再启动真实 bootmgfw。
     EFI_STATUS status = parse_uefi_boot_image_info(parent_image_handle);
 
     if (status == EFI_SUCCESS)
@@ -198,6 +208,8 @@ EFI_STATUS bootmgfw_run_original_image(EFI_HANDLE parent_image_handle, EFI_HANDL
 
                 if (status == EFI_SUCCESS)
                 {
+                    // 从这里开始，控制流回归 Windows 标准启动流程，
+                    // 但我们已经插入了 hook 链，后续会在 winload/hvloader 阶段接力。
                     status = start_image(loaded_image);
                 }
                 else

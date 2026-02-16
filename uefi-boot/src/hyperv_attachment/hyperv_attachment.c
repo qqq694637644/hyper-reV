@@ -1,4 +1,4 @@
-#include "hyperv_attachment.h"
+﻿#include "hyperv_attachment.h"
 #include "../memory_manager/memory_manager.h"
 #include "../structures/relocation_entry.h"
 #include "../image/image.h"
@@ -18,6 +18,8 @@ UINT32 hyperv_attachment_heap_4kb_pages_reserved = 1024;
 
 EFI_STATUS hyperv_attachment_set_up_heap(UINT64 hyperv_attachment_pages_needed)
 {
+    // 统一从一块连续 4KB 对齐页内存中切分：
+    // [image pages] + [identity map page tables] + [attachment 内部 heap 预留页]。
     UINT64 total_pages_needed = 2 + hyperv_attachment_pages_needed + hyperv_attachment_heap_4kb_pages_reserved;
 
     EFI_STATUS status = mm_allocate_pages((void**)&hyperv_attachment_heap_allocation_base, total_pages_needed, EfiRuntimeServicesData);
@@ -35,6 +37,10 @@ EFI_STATUS hyperv_attachment_set_up_heap(UINT64 hyperv_attachment_pages_needed)
 
 EFI_STATUS hyperv_attachment_set_up()
 {
+    // 1) 从 EFI 分区读取 hyperv-attachment.dll，并立即删除磁盘文件；
+    // 2) 计算映像页数并建立专用 heap；
+    // 3) 把 DLL 映像复制到物理页布局中；
+    // 4) 预分配 PML4/PDPT 给 hvloader 阶段 identity map 使用。
     EFI_STATUS status = hyperv_attachment_load_and_delete_from_disk(&hyperv_attachment_file_buffer);
 
     if (status == EFI_SUCCESS)
@@ -64,6 +70,7 @@ EFI_STATUS hyperv_attachment_set_up()
 
 UINT64 hyperv_attachment_get_pages_needed()
 {
+    // 按 PE OptionalHeader.SizeOfImage 换算到页数（向上取整）。
     EFI_IMAGE_NT_HEADERS64* nt_headers = image_get_nt_headers(hyperv_attachment_file_buffer);
 
     UINT8 is_page_aligned = (nt_headers->OptionalHeader.SizeOfImage % 0x1000) == 0;
@@ -100,6 +107,7 @@ EFI_STATUS hyperv_attachment_do_heap_allocation(void** allocation_base_out, UINT
 
     *allocation_base_out = (void*)hyperv_attachment_heap_allocation_usable_base;
 
+    // bump-pointer 分配器：只向前推进，UEFI 阶段无需复杂 free。
     hyperv_attachment_heap_allocation_usable_base = next_usable_base;
 
     return EFI_SUCCESS;
@@ -113,6 +121,9 @@ void free_hyperv_attachment_file_buffer()
 
 EFI_STATUS hyperv_attachment_allocate_and_copy(UINT64 pages_needed)
 {
+    // 先分配目标物理页，再按 PE 规则复制：
+    // - 先拷 headers；
+    // - 再逐 section 拷 raw data 到 VirtualAddress 对应偏移。
     EFI_STATUS status = hyperv_attachment_do_heap_allocation((void**)&hyperv_attachment_physical_base, pages_needed);
 
     if (status != EFI_SUCCESS)
@@ -143,6 +154,9 @@ EFI_STATUS hyperv_attachment_remap_image(UINT8** hyperv_attachment_virtual_base_
         return EFI_INVALID_PARAMETER;
     }
 
+    // 依赖 hvloader 注入到 Hyper-V 页表中的 identity map：
+    // virtual = (255 << 39) + physical。
+    // 这样 attachment 在 Hyper-V address space 内有稳定 VA 可执行。
     const UINT64 physical_memory_access_base = 255ull << 39;
 
     *hyperv_attachment_virtual_base_out = physical_memory_access_base + hyperv_attachment_physical_base;
@@ -152,6 +166,8 @@ EFI_STATUS hyperv_attachment_remap_image(UINT8** hyperv_attachment_virtual_base_
 
 EFI_STATUS hyperv_attachment_apply_relocation(UINT8* hyperv_attachment_virtual_base)
 {
+    // attachment 最初是按 ImageBase 链接的；
+    // 实际运行 VA 变成了 remap 后地址，因此必须手动应用 DIR64 重定位。
     EFI_IMAGE_NT_HEADERS64* nt_headers = image_get_nt_headers(hyperv_attachment_virtual_base);
 
     EFI_IMAGE_DATA_DIRECTORY* base_relocation_directory = &nt_headers->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC];
@@ -198,6 +214,7 @@ EFI_STATUS hyperv_attachment_get_entry_point(UINT8** entry_point_out, UINT8* hyp
 
 EFI_STATUS hyperv_attachment_get_relocated_entry_point(UINT8** hyperv_attachment_entry_point)
 {
+    // 组合步骤：remap -> relocation -> 取 OEP。
     UINT8* hyperv_attachment_virtual_base = NULL;
 
     EFI_STATUS status = hyperv_attachment_remap_image(&hyperv_attachment_virtual_base);
@@ -221,6 +238,11 @@ typedef void(*hyperv_attachment_entry_point_t)(UINT8** hyperv_attachment_vmexit_
 
 void hyperv_attachment_invoke_entry_point(UINT8** hyperv_attachment_vmexit_handler_detour_out, UINT8* hyperv_attachment_entry_point, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget)
 {
+    // 把 hvloader 侧收集到的关键上下文一次性交给 attachment：
+    // - 原 vmexit handler（用于未处理路径回落）；
+    // - heap 区间；
+    // - uefi-boot 映像物理信息（用于后续清理痕迹）；
+    // - AMD 下的 get_vmcb gadget。
     ((hyperv_attachment_entry_point_t)hyperv_attachment_entry_point)(hyperv_attachment_vmexit_handler_detour_out, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget);
 }
 
@@ -264,6 +286,7 @@ EFI_STATUS hyperv_attachment_load_and_delete_from_disk(UINT8** file_buffer_out)
 
                     if (dos_header->e_magic != 0x5a4d)
                     {
+                        // 不是有效 PE，拒绝继续。
                         mm_free_pool(*file_buffer_out);
 
                         status = EFI_NOT_FOUND;

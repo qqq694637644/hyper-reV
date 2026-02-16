@@ -1,4 +1,4 @@
-#include "hvloader.h"
+﻿#include "hvloader.h"
 
 #include "../bootmgfw/bootmgfw.h"
 #include "../hooks/hooks.h"
@@ -15,6 +15,10 @@ typedef void(*hvloader_launch_hv_t)(cr3 a1, virtual_address_t a2, UINT64 a3, UIN
 
 void set_up_identity_map(pml4e_64* pml4e)
 {
+    // 构造一个最小 identity map：
+    // - PML4[0] 指向我们控制的 PDPT；
+    // - PDPT 用 1GB 大页线性映射前 512GB 物理内存（VA==PA）。
+    // 目的：在 Hyper-V 启动前，能稳定访问 host 物理内存中的 attachment 映像。
     pdpte_1gb_64* pdpt = (pdpte_1gb_64*)pdpt_physical_allocation;
 
     pml4e->flags = 0;
@@ -36,18 +40,23 @@ void set_up_identity_map(pml4e_64* pml4e)
 
 void load_identity_map_into_hyperv_cr3(cr3 identity_map_cr3, cr3 hyperv_cr3, pml4e_64 identity_map_pml4e, pml4e_64* initial_hyperv_pml4e)
 {
+    // 先切到 identity_map_cr3，保证当前 CPU 能直接访问 hyperv_cr3 指向的页表物理地址。
     AsmWriteCr3(identity_map_cr3.flags);
 
     pml4e_64* hyperv_pml4 = (pml4e_64*)(hyperv_cr3.address_of_page_directory << 12);
 
     *initial_hyperv_pml4e = hyperv_pml4[0];
 
+    // 注入两个入口：
+    // - PML4[0]：让后续查表路径可直接覆盖低地址区；
+    // - PML4[255]：供 attachment 通过固定高位虚拟地址访问物理映像。
     hyperv_pml4[0] = identity_map_pml4e;
     hyperv_pml4[255] = identity_map_pml4e;
 }
 
 void restore_initial_hyperv_pml4e(cr3 identity_map_cr3, cr3 hyperv_cr3, pml4e_64 initial_hyperv_pml4e)
 {
+    // hook 完成后恢复原始 PML4[0]，减少对 Hyper-V 原始页表布局的长期扰动。
     AsmWriteCr3(identity_map_cr3.flags);
 
     pml4e_64* hyperv_pml4 = (pml4e_64*)(hyperv_cr3.address_of_page_directory << 12);
@@ -58,6 +67,8 @@ void restore_initial_hyperv_pml4e(cr3 identity_map_cr3, cr3 hyperv_cr3, pml4e_64
 // must have identity map in 0th pml4e
 UINT8 is_page_executable(cr3 cr3_to_search, virtual_address_t page)
 {
+    // 按 4 级页表逐级检查 present/NX 位，判断目标 VA 对应页是否可执行。
+    // 用于向前/向后扫描 Hyper-V 的 .text 边界。
     pml4e_64* pml4 = (pml4e_64*)(cr3_to_search.address_of_page_directory << 12);
     pml4e_64 pml4e = pml4[page.pml4_idx];
 
@@ -129,6 +140,8 @@ UINT64 find_hyperv_text_end(cr3 hyperv_cr3, virtual_address_t entry_point)
 
 void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 {
+    // 进入 Hyper-V 的地址空间后，基于 entry_point 反推整段可执行代码范围。
+    //切换到Cr3 页表 
     AsmWriteCr3(hyperv_cr3.flags);
 
     UINT64 hyperv_text_base = find_hyperv_text_base(hyperv_cr3, entry_point);
@@ -160,6 +173,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
             if (status == EFI_SUCCESS)
             {
+                // 解析 call rva 得到原 vmexit handler 地址，稍后交给 attachment 包装。
                 INT32 original_vmexit_handler_rva = *(INT32*)(code_ref_to_vmexit_handler + 1);
                 CHAR8* original_vmexit_handler = (code_ref_to_vmexit_handler + 5) + original_vmexit_handler_rva;
 
@@ -169,6 +183,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
                 if (is_intel == 0)
                 {
+                    // AMD 路径额外定位 get_vmcb gadget，attachment 需要它拿到当前 VMCB。
                     status = scan_image(&get_vmcb_gadget, (CHAR8*)hyperv_text_base, hyperv_text_size, "\x65\x48\x8B\x04\x25\x00\x00\x00\x00\x48\x8B\x88\x00\x00\x00\x00\x48\x8B\x81\x00\x00\x00\x00\x48\x8B", "xxxxx????xxx????xxx????xx");
 
                     if (status != EFI_SUCCESS)
@@ -189,6 +204,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
                 if (status == EFI_SUCCESS)
                 {
+                    // 在 code cave 内布置跳板，再改写原 call 的目标，完成 vmexit handler 劫持。
                     status = hook_create(&hv_vmexit_hook_data, code_cave, hyperv_attachment_vmexit_handler_detour);
 
                     if (status == EFI_SUCCESS)
@@ -207,6 +223,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
 void hvloader_launch_hv_detour(cr3 hyperv_cr3, virtual_address_t hyperv_entry_point, UINT64 jmp_gadget, UINT64 kernel_cr3)
 {
+    // hvloader 最关键 detour：Hyper-V 正式跳转前的最后窗口。
     hook_disable(&hvloader_launch_hv_hook_data);
 
     pml4e_64* virtual_pml4 = (pml4e_64*)pml4_physical_allocation;
@@ -221,12 +238,14 @@ void hvloader_launch_hv_detour(cr3 hyperv_cr3, virtual_address_t hyperv_entry_po
 
     load_identity_map_into_hyperv_cr3(identity_map_cr3, hyperv_cr3, virtual_pml4[0], &initial_hyperv_pml4e);
 
+    // 在 Hyper-V address space 内完成 attachment 注入和 vmexit 路由替换。
     set_up_hyperv_hooks(hyperv_cr3, hyperv_entry_point);
 
     restore_initial_hyperv_pml4e(identity_map_cr3, hyperv_cr3, initial_hyperv_pml4e);
 
     AsmWriteCr3(original_cr3);
 
+    // 回到原始 hvloader 启动逻辑，不破坏正常控制流。
     hvloader_launch_hv_t original_subroutine = (hvloader_launch_hv_t)hvloader_launch_hv_hook_data.hooked_subroutine_address;
 
     original_subroutine(hyperv_cr3, hyperv_entry_point, jmp_gadget, kernel_cr3);
