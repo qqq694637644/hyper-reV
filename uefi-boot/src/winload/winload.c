@@ -19,30 +19,8 @@ UINT64 winload_load_pe_image_detour(bl_file_info_t* file_info, INT32 a2, UINT64*
 
     UINT64 return_value = original_subroutine(file_info, a2, image_base, image_size, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
 
-    CHAR16* module_name = L"<null>";
-
-    if (file_info != NULL && file_info->file_name != NULL)
-    {
-        module_name = file_info->file_name;
-    }
-
-    UINT64 loaded_image_base = 0;
-    UINT32 loaded_image_size = 0;
-
-    if (image_base != NULL)
-    {
-        loaded_image_base = *image_base;
-    }
-
-    if (image_size != NULL)
-    {
-        loaded_image_size = *image_size;
-    }
-
-    Print(L"[winload] current module: %s | image_base=%p | image_size=0x%x\n", module_name, (void*)(UINTN)loaded_image_base, loaded_image_size);
-
     // 命中 hvloader 时进入下一跳：在 hvloader 的 Hyper-V 启动路径上挂钩。
-    if (file_info != NULL && file_info->file_name != NULL && StrStr(file_info->file_name, L"hvloader") != NULL)
+    if (StrStr(file_info->file_name, L"hvloader") != NULL)
     {
         hvloader_place_hooks(*image_base, *image_size);
 
