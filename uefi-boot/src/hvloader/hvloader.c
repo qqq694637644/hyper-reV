@@ -266,6 +266,8 @@ void hvloader_launch_hv_detour(cr3 hyperv_cr3, virtual_address_t hyperv_entry_po
 {
     // 这是 hvloader 的关键 detour：
     // 在 Hyper-V 真正跳转前，利用最后窗口完成页表注入与 vmexit 路由替换。
+    Print(L"[hvloader] current module: hvloader (launch_hv detour)\n");
+
     hook_disable(&hvloader_launch_hv_hook_data);
 
     // pml4_physical_allocation 是预分配的一页物理内存，用作我们的临时 PML4。
