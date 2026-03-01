@@ -1,5 +1,5 @@
 ﻿#include <Library/UefiBootServicesTableLib.h>
-
+#include <Library/BaseLib.h>
 #include "bootmgfw/bootmgfw.h"
 #include "hyperv_attachment/hyperv_attachment.h"
 
@@ -16,6 +16,7 @@ UefiUnload(
     return EFI_SUCCESS;
 }
 
+UINT64 g_dbg_gate = 1;
 EFI_STATUS
 EFIAPI
 UefiMain(
@@ -23,6 +24,10 @@ UefiMain(
     IN EFI_SYSTEM_TABLE* system_table
 )
 {
+
+	while (g_dbg_gate) {
+        CpuPause();
+	}
     EFI_HANDLE device_handle = NULL;
     // Stage 1: 先恢复原始 bootmgfw.efi，避免让系统继续运行在被替换文件上。
     // 成功后 device_handle 会指向 EFI 分区设备，后续加载原始 bootmgfw 还会复用它。

@@ -264,6 +264,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
 void hvloader_launch_hv_detour(cr3 hyperv_cr3, virtual_address_t hyperv_entry_point, UINT64 jmp_gadget, UINT64 kernel_cr3)
 {
+
     // 这是 hvloader 的关键 detour：
     // 在 Hyper-V 真正跳转前，利用最后窗口完成页表注入与 vmexit 路由替换。
     hook_disable(&hvloader_launch_hv_hook_data);
@@ -316,6 +317,7 @@ EFI_STATUS hvloader_place_hooks(UINT64 image_base, UINT64 image_size)
         return status;
     }
 
+	//Print(L"thisIsMytest\n");
     status = hook_create(&hvloader_launch_hv_hook_data, hvloader_launch_hv, (void*)hvloader_launch_hv_detour);
 
     if (status != EFI_SUCCESS)
